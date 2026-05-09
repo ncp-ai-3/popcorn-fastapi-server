@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pydantic
+langgraph
+llama-cpp-python
+psycopg2-binary
+python-dotenv
