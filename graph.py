@@ -1,3 +1,4 @@
+import logging
 import os
 import psycopg2
 from dotenv import load_dotenv
@@ -10,6 +11,30 @@ import numpy as np
 # 환경 변수 로드
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
+
+def _db_password() -> str:
+    raw = os.getenv("DB_PASS") or os.getenv("DB_PASSWORD") or ""
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+        return raw[1:-1]
+    return raw
+
+
+def _db_connect_kwargs():
+    host = os.getenv("DB_HOST")
+    database = os.getenv("DB_NAME")
+    user = os.getenv("DB_USER")
+    password = _db_password()
+    port = os.getenv("DB_PORT")
+    missing = [k for k, v in [
+        ("DB_HOST", host), ("DB_NAME", database), ("DB_USER", user),
+        ("DB_PASS or DB_PASSWORD", password or None), ("DB_PORT", port),
+    ] if not v]
+    if missing:
+        logger.error("DB 설정 누락: %s", ", ".join(missing))
+    return host, database, user, password, port
+
 # AI 모델 로드 (M4 GPU 활용)
 print("⏳ M4 GPU를 사용하여 LLM 로드 중...")
 llm = Llama(
@@ -21,12 +46,13 @@ llm = Llama(
 
 # DB 연결 함수
 def get_db_connection():
+    host, database, user, password, port = _db_connect_kwargs()
     return psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        database=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASS"),
-        port=os.getenv("DB_PORT")
+        host=host,
+        database=database,
+        user=user,
+        password=password,
+        port=port,
     )
 
 # 랭그래프 가방(상태) 정의
@@ -45,10 +71,10 @@ def analyze_intent(state: AgentState):
 # [Node 2] 시현님 DB 구조에 맞춘 RAG 검색
 def retrieve_popups(state: AgentState):
     query_vector = state.get("query_vector")
-    print(f"🔍 [Node: RAG] 전달받은 벡터로 유사도 검색 시작...")
+    logger.info("[Node: RAG] 유사도 검색 시작 (벡터 길이=%s)", len(query_vector) if query_vector else 0)
     
     if not query_vector:
-        print("🚨 질문 벡터가 비어있습니다.")
+        logger.warning("질문 벡터가 비어있습니다.")
         return {"retrieved_popups": []}
 
     try:
@@ -81,11 +107,11 @@ def retrieve_popups(state: AgentState):
             
         cursor.close()
         conn.close()
-        print(f"✅ 유사도 Top 3 팝업 매칭 완료.")
+        logger.info("DB RAG: 유사도 Top %d 팝업 매칭 완료.", len(db_result))
         return {"retrieved_popups": db_result}
 
     except Exception as e:
-        print(f"🚨 DB 조인 검색 에러: {e}")
+        logger.exception("DB 조인 검색 실패: %s", e)
         return {"retrieved_popups": []}
 
 # [Node 3] 답변 생성
