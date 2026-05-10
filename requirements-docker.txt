@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+httpx
+pydantic
+langgraph
+psycopg2-binary
+python-dotenv
+numpy

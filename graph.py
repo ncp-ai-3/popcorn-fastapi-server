@@ -35,13 +35,44 @@ def _db_connect_kwargs():
         logger.error("DB 설정 누락: %s", ", ".join(missing))
     return host, database, user, password, port
 
-# AI 모델 로드 (M4 GPU 활용)
-print("⏳ M4 GPU를 사용하여 LLM 로드 중...")
+
+def _llm_model_path() -> str:
+    return os.getenv(
+        "LLM_MODEL_PATH",
+        "./qwen2-1_5b-instruct-q4_k_m.gguf",
+    ).strip()
+
+
+def _llm_n_gpu_layers() -> int:
+    raw = os.getenv("LLM_N_GPU_LAYERS", "-1").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("LLM_N_GPU_LAYERS=%r invalid; using 0", raw)
+        return 0
+
+
+def _llm_n_ctx() -> int:
+    raw = os.getenv("LLM_N_CTX", "2048").strip()
+    try:
+        return max(256, int(raw))
+    except ValueError:
+        return 2048
+
+
+_model_path = _llm_model_path()
+_n_gpu = _llm_n_gpu_layers()
+logger.info(
+    "Loading LLM model_path=%s n_gpu_layers=%d n_ctx=%d",
+    _model_path,
+    _n_gpu,
+    _llm_n_ctx(),
+)
 llm = Llama(
-    model_path="./qwen2-1_5b-instruct-q4_k_m.gguf", 
-    n_gpu_layers=-1, 
-    n_ctx=2048,
-    verbose=False
+    model_path=_model_path,
+    n_gpu_layers=_n_gpu,
+    n_ctx=_llm_n_ctx(),
+    verbose=False,
 )
 
 # DB 연결 함수

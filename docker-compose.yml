@@ -1,0 +1,16 @@
+# NCP VM: Docker 설치 후 이 디렉터리에서 사용. ACG(보안 그룹)에서 8000(또는 리버스 프록시 시 80/443) 인바운드 허용.
+# 배포 전: cp .env.example .env 후 값 채우기. GGUF는 ./models/ 에 두거나 볼륨·LLM_MODEL_PATH 를 맞춤.
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      LLM_N_GPU_LAYERS: "0"
+    volumes:
+      # 호스트에 models/qwen2-1_5b-instruct-q4_k_m.gguf 를 두거나, 다른 경로를 마운트한 뒤
+      # LLM_MODEL_PATH 를 컨테이너 내부 경로에 맞게 .env 에 설정하세요.
+      - ./models:/app/models:ro
+    restart: unless-stopped

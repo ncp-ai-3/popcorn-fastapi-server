@@ -1,0 +1,15 @@
+.venv
+venv
+env
+popup_env
+__pycache__
+*.pyc
+.git
+.gitignore
+.vscode
+*.gguf
+*.bin
+model_cache
+.env
+docs
+test_*.py
