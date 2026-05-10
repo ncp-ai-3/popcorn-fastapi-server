@@ -2,14 +2,16 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 from llama_cpp import Llama
-from typing import TypedDict, List, Optional
+from typing import TypedDict, List
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+import numpy as np
 
-# 1. 환경 변수 및 모델 로드
+# 환경 변수 로드
 load_dotenv()
 
-print("⏳ M4 GPU를 사용하여 모델을 로드하는 중...")
+# AI 모델 로드 (M4 GPU 활용)
+print("⏳ M4 GPU를 사용하여 LLM 로드 중...")
 llm = Llama(
     model_path="./qwen2-1_5b-instruct-q4_k_m.gguf", 
     n_gpu_layers=-1, 
@@ -17,33 +19,54 @@ llm = Llama(
     verbose=False
 )
 
-# 2. 상태 정의 (history는 없을 수 있으므로 초기값 처리가 중요합니다)
+# DB 연결 함수
+def get_db_connection():
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASS"),
+        port=os.getenv("DB_PORT")
+    )
+
+# 랭그래프 가방(상태) 정의
 class AgentState(TypedDict):
     user_query: str
+    query_vector: List[float]
     intent: str
     retrieved_popups: List[dict]
-    history: List[str]  # 대화 기록 저장
+    history: List[str]
     final_answer: str
 
-# 3. 노드 함수들
+# [Node 1] 의도 파악
 def analyze_intent(state: AgentState):
-    # 나중에 의도 분류 로직을 추가할 수 있습니다.
     return {"intent": "popup_search"}
 
+# [Node 2] 시현님 DB 구조에 맞춘 RAG 검색
 def retrieve_popups(state: AgentState):
-    print("[Node: RAG 검색] DB에서 데이터를 가져오는 중...")
+    query_vector = state.get("query_vector")
+    print(f"🔍 [Node: RAG] 전달받은 벡터로 유사도 검색 시작...")
+    
+    if not query_vector:
+        print("🚨 질문 벡터가 비어있습니다.")
+        return {"retrieved_popups": []}
+
     try:
-        conn = psycopg2.connect(
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            dbname=os.getenv("DB_NAME")
-        )
+        conn = get_db_connection()
         cursor = conn.cursor()
+
+        # 시현님이 주신 popup_embedding(pe)과 실제 정보가 있는 popup(p) 조인 쿼리
+        query = """
+            SELECT 
+                p.id, p.title, p.description, p.latitude, p.longitude
+            FROM popup_embedding pe
+            JOIN popup p ON pe.popup_id = p.id
+            WHERE p.start_date <= CURRENT_DATE AND p.end_date >= CURRENT_DATE
+            ORDER BY pe.embedding <=> %s::vector
+            LIMIT 3;
+        """
         
-        # Spring application.yml에 적힌 DB 정보를 바탕으로 쿼리 실행
-        cursor.execute("SELECT id, title, description, latitude, longitude FROM popup LIMIT 3;")
+        cursor.execute(query, (query_vector,))
         rows = cursor.fetchall()
         
         db_result = []
@@ -52,38 +75,39 @@ def retrieve_popups(state: AgentState):
                 "id": row[0],
                 "name": row[1],
                 "desc": row[2],
-                "lat": float(row[3]) if row[3] else 0.0,
-                "lng": float(row[4]) if row[4] else 0.0
+                "lat": row[3],
+                "lon": row[4]
             })
             
         cursor.close()
         conn.close()
-        print(f"✅ DB 검색 완료! {len(db_result)}개의 팝업을 찾았습니다.")
+        print(f"✅ 유사도 Top 3 팝업 매칭 완료.")
         return {"retrieved_popups": db_result}
-        
+
     except Exception as e:
-        print(f"🚨 DB 연결 에러: {e}")
+        print(f"🚨 DB 조인 검색 에러: {e}")
         return {"retrieved_popups": []}
 
+# [Node 3] 답변 생성
 def generate_recommendation(state: AgentState):
     query = state["user_query"]
     popups = state.get("retrieved_popups", [])
     history = state.get("history") or []
     
-    # 팝업 목록을 번호를 붙여서 더 명확하게 전달
-    context = "\n".join([f"{i+1}. {p['name']}: {p['desc']}" for i, p in enumerate(popups)])
+    # 팝업 정보를 텍스트로 변환
+    context = "\n".join([f"- {p['name']}: {p['desc']}" for p in popups])
     history_context = "\n".join(history[-5:])
     
     prompt = f"""<|im_start|>system
-당신은 성수동 팝업스토어 가이드입니다. 
-당신은 반드시 아래 [팝업 목록]에 제공된 3개의 장소를 하나도 빠짐없이 모두 추천해야 합니다. 
-만약 목록이 3개보다 적다면 있는 것만이라도 상세히 설명하세요.
-
-[이전 대화]:
-{history_context}
+당신은 성수동 팝업스토어 전문 가이드입니다. 
+제공된 [팝업 목록]의 정보를 바탕으로 사용자의 질문에 친절하게 답하세요. 
+반드시 목록에 있는 장소들을 중심으로 설명해야 합니다.
 
 [팝업 목록]:
 {context}
+
+[이전 대화]:
+{history_context}
 <|im_end|>
 <|im_start|>user
 {query}<|im_end|>
@@ -92,7 +116,6 @@ def generate_recommendation(state: AgentState):
     output = llm(prompt, max_tokens=512, stop=["<|im_end|>"], echo=False)
     answer = output["choices"][0]["text"].strip()
     
-    # 새로운 대화를 history에 누적
     new_history = history + [f"User: {query}", f"AI: {answer}"]
     
     return {
@@ -100,9 +123,8 @@ def generate_recommendation(state: AgentState):
         "history": new_history
     }
 
-# 4. 워크플로우 구성
+# 워크플로우 조립
 workflow = StateGraph(AgentState)
-
 workflow.add_node("analyze_intent", analyze_intent)
 workflow.add_node("retrieve_popups", retrieve_popups)
 workflow.add_node("generate", generate_recommendation)
@@ -112,6 +134,5 @@ workflow.add_edge("analyze_intent", "retrieve_popups")
 workflow.add_edge("retrieve_popups", "generate")
 workflow.add_edge("generate", END)
 
-# 5. 체크포인터(단기기억 저장소) 연결 및 컴파일
 memory = MemorySaver()
 app = workflow.compile(checkpointer=memory)

@@ -1,32 +1,36 @@
+import os
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import List, Optional
 import uvicorn
-from graph import app as app_graph # 랭그래프 가져오기
+from graph import app as langgraph_app
 
 app = FastAPI()
 
-# 1. Spring에서 오는 요청 데이터 형식 (숫자 1이 와도 문자열 "1"로 자동 변환됨)
+# Spring에서 보내주는 데이터를 담는 그릇
 class SpringRequest(BaseModel):
-    userId: str 
-    question: str
+    userId: str
+    queryVector: List[float]  # 시현님이 주시는 768차원 숫자 리스트
+    question: str             # 유저가 입력한 실제 텍스트 질문
 
 @app.post("/recommend")
-async def recommend(data: SpringRequest):
-    print(f"🚀 [Spring -> FastAPI] userId: {data.userId}, question: {data.question}")
+async def recommend(request: SpringRequest):
+    # 랭그래프 실행을 위한 입력값 세팅
+    # 체크포인트를 위한 thread_id는 유저별로 고유하게 관리합니다.
+    config = {"configurable": {"thread_id": request.userId}}
     
-    config = {"configurable": {"thread_id": data.userId}}
-    inputs = {"user_query": data.question} 
+    inputs = {
+        "user_query": request.question,
+        "query_vector": request.queryVector
+    }
     
-    # 2. 랭그래프 실행
-    result = app_graph.invoke(inputs, config=config)
+    # 랭그래프 가동!
+    result = langgraph_app.invoke(inputs, config=config)
     
-    # 3. 💡 핵심! 랭그래프의 가방(retrieved_popups)에서 'id' 숫자만 쏙쏙 뽑아내기
-    popups = result.get("retrieved_popups", [])
-    popup_ids = [popup["id"] for popup in popups] 
-    
+    # 최종 결과 반환
     return {
-        "answer": result["final_answer"],
-        "popupIds": popup_ids
+        "answer": result.get("final_answer"),
+        "retrieved_popups": result.get("retrieved_popups")
     }
 
 if __name__ == "__main__":
