@@ -13,6 +13,7 @@ print("⏳ M4 GPU를 사용하여 모델을 로드하는 중...")
 llm = Llama(
     model_path="./qwen2-1_5b-instruct-q4_k_m.gguf", 
     n_gpu_layers=-1, 
+    n_ctx=2048,
     verbose=False
 )
 
