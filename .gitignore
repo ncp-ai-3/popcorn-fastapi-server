@@ -1,4 +1,5 @@
 # 가상환경
+.venv/
 popup_env/
 env/
 venv/
@@ -6,6 +7,7 @@ venv/
 # AI 모델 파일
 *.gguf
 *.bin
+model_cache/
 
 # 파이썬 캐시
 __pycache__/
@@ -13,6 +15,8 @@ __pycache__/
 
 # 맥 OS 시스템 파일
 .DS_Store
+
+docs/
 
 # 환경변수 (비밀번호 숨기기)
 .env

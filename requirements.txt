@@ -1,7 +1,11 @@
 fastapi
 uvicorn
+httpx
 pydantic
 langgraph
+# Windows: 소스 설치 시 긴 경로 오류 나면 wheel 사용
+# pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 llama-cpp-python
 psycopg2-binary
 python-dotenv
+sentence-transformers

@@ -1,37 +1,84 @@
-import os
-from fastapi import FastAPI
+import logging
+import uvicorn
+import httpx
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import uvicorn
+
+from embedding_client import fetch_query_embedding
 from graph import app as langgraph_app
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Spring에서 보내주는 데이터를 담는 그릇
+
 class SpringRequest(BaseModel):
     userId: str
-    queryVector: List[float]  # 시현님이 주시는 768차원 숫자 리스트
-    question: str             # 유저가 입력한 실제 텍스트 질문
+    question: str
+    # 제공되면 임베딩 API를 호출하지 않고 해당 벡터 사용 (기존·로컬 테스트용)
+    queryVector: Optional[List[float]] = None
+
+
+def _embedding_preview_50(vec: List[float]) -> str:
+    head = vec[:12]
+    s = "[" + ", ".join(f"{x:.4f}" for x in head)
+    if len(vec) > len(head):
+        s += ", ..."
+    s += "]"
+    return s[:50]
+
 
 @app.post("/recommend")
 async def recommend(request: SpringRequest):
-    # 랭그래프 실행을 위한 입력값 세팅
-    # 체크포인트를 위한 thread_id는 유저별로 고유하게 관리합니다.
     config = {"configurable": {"thread_id": request.userId}}
-    
+
+    logger.info(
+        "[chat] userId=%s user_message=%s",
+        request.userId,
+        request.question,
+    )
+
+    if request.queryVector is not None:
+        query_vector = request.queryVector
+        logger.info("[embedding] source=client_body dim=%d preview_50=%s", len(query_vector), _embedding_preview_50(query_vector))
+    else:
+        try:
+            query_vector = await fetch_query_embedding(request.question)
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"embedding API HTTP {e.response.status_code}",
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"embedding API unreachable: {e.__class__.__name__}",
+            )
+        logger.info(
+            "[embedding] source=embed_api dim=%d preview_50=%s",
+            len(query_vector),
+            _embedding_preview_50(query_vector),
+        )
+
     inputs = {
         "user_query": request.question,
-        "query_vector": request.queryVector
+        "query_vector": query_vector,
     }
-    
-    # 랭그래프 가동!
+
     result = langgraph_app.invoke(inputs, config=config)
-    
-    # 최종 결과 반환
+
     return {
         "answer": result.get("final_answer"),
-        "retrieved_popups": result.get("retrieved_popups")
+        "retrieved_popups": result.get("retrieved_popups"),
     }
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
