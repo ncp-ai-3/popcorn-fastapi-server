@@ -99,6 +99,14 @@ class AgentState(TypedDict):
 def analyze_intent(state: AgentState):
     return {"intent": "popup_search"}
 
+def _popup_preview_50(name: str, desc: str) -> str:
+    """로그용: 제목·설명 앞 50자(개행은 공백으로)."""
+    raw = f"{name or ''}: {desc or ''}".replace("\n", " ").strip()
+    if len(raw) <= 50:
+        return raw
+    return raw[:50] + "…"
+
+
 # [Node 2] 시현님 DB 구조에 맞춘 RAG 검색
 def retrieve_popups(state: AgentState):
     query_vector = state.get("query_vector")
@@ -112,7 +120,8 @@ def retrieve_popups(state: AgentState):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # 시현님이 주신 popup_embedding(pe)과 실제 정보가 있는 popup(p) 조인 쿼리
+        # popup_embedding(pe)과 popup(p) 조인.
+        # pe.embedding <=> 쿼리벡터 : pgvector 코사인 거리(작을수록 유사). 기간 내 팝업만, 상위 3건.
         query = """
             SELECT 
                 p.id, p.title, p.description, p.latitude, p.longitude
@@ -138,7 +147,21 @@ def retrieve_popups(state: AgentState):
             
         cursor.close()
         conn.close()
-        logger.info("DB RAG: 유사도 Top %d 팝업 매칭 완료.", len(db_result))
+        ids_str = ", ".join(str(p["id"]) for p in db_result) if db_result else "(없음)"
+        logger.info(
+            "DB RAG: 유사도 Top %d 팝업 매칭 완료. popup_db_ids=[%s]",
+            len(db_result),
+            ids_str,
+        )
+        for rank, p in enumerate(db_result, start=1):
+            title = p.get("name") or ""
+            desc = p.get("desc") or ""
+            logger.info(
+                "DB RAG: rank=%d id=%s preview_50=%s",
+                rank,
+                p["id"],
+                _popup_preview_50(title, desc),
+            )
         return {"retrieved_popups": db_result}
 
     except Exception as e:
