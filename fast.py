@@ -33,8 +33,8 @@ def _embedding_preview_50(vec: List[float]) -> str:
     return s[:50]
 
 
-@app.post("/recommend")
-async def recommend(request: SpringRequest):
+@app.post("/chat")
+async def chat(request: SpringRequest):
     config = {"configurable": {"thread_id": request.userId}}
 
     logger.info(
