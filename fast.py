@@ -83,6 +83,7 @@ async def chat(request: SpringRequest):
     return {
         "answer": result.get("final_answer"),
         "retrieved_popups": result.get("retrieved_popups"),
+        "matched_popup_ids": result.get("matched_popup_ids", []),
     }
 
 

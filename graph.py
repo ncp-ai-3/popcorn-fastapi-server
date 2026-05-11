@@ -3,7 +3,7 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 from llama_cpp import Llama
-from typing import TypedDict, List
+from typing import TypedDict, List, NotRequired
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 import numpy as np
@@ -60,6 +60,16 @@ def _llm_n_ctx() -> int:
         return 2048
 
 
+def _rag_cosine_distance_max() -> float:
+    """pgvector 코사인 거리(<=>) 상한. 이보다 작은(더 유사한) 행만 RAG 후보."""
+    raw = os.getenv("RAG_COSINE_DISTANCE_MAX", "0.4").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("RAG_COSINE_DISTANCE_MAX=%r invalid; using 0.4", raw)
+        return 0.4
+
+
 _model_path = _llm_model_path()
 _n_gpu = _llm_n_gpu_layers()
 logger.info(
@@ -94,6 +104,7 @@ class AgentState(TypedDict):
     retrieved_popups: List[dict]
     history: List[str]
     final_answer: str
+    matched_popup_ids: NotRequired[List[int]]
 
 # [Node 1] 의도 파악
 def analyze_intent(state: AgentState):
@@ -114,59 +125,97 @@ def retrieve_popups(state: AgentState):
     
     if not query_vector:
         logger.warning("질문 벡터가 비어있습니다.")
-        return {"retrieved_popups": []}
+        return {"retrieved_popups": [], "matched_popup_ids": []}
 
+    threshold = _rag_cosine_distance_max()
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
         # popup_embedding(pe)과 popup(p) 조인.
-        # pe.embedding <=> 쿼리벡터 : pgvector 코사인 거리(작을수록 유사). 기간 내 팝업만, 상위 3건.
+        # pe.embedding <=> 쿼리벡터 : pgvector 코사인 거리(작을수록 유사).
+        # threshold 미만을 거리순 우선, 부족하면 threshold 이상 중 거리순으로 채워 최대 3건.
         query = """
-            SELECT 
-                p.id, p.title, p.description, p.latitude, p.longitude
-            FROM popup_embedding pe
-            JOIN popup p ON pe.popup_id = p.id
-            WHERE p.start_date <= CURRENT_DATE AND p.end_date >= CURRENT_DATE
-            ORDER BY pe.embedding <=> %s::vector
-            LIMIT 3;
+            WITH ranked AS (
+                SELECT 
+                    p.id, p.title, p.description, p.latitude, p.longitude,
+                    (pe.embedding <=> %s::vector) AS cosine_distance
+                FROM popup_embedding pe
+                JOIN popup p ON pe.popup_id = p.id
+                WHERE p.start_date <= CURRENT_DATE AND p.end_date >= CURRENT_DATE
+            ),
+            ordered AS (
+                SELECT
+                    id, title, description, latitude, longitude, cosine_distance,
+                    COUNT(*) FILTER (WHERE cosine_distance < %s) OVER () AS below_threshold_total,
+                    (cosine_distance < %s) AS is_below_threshold,
+                    ROW_NUMBER() OVER (
+                        ORDER BY (cosine_distance < %s) DESC, cosine_distance ASC
+                    ) AS rn
+                FROM ranked
+            )
+            SELECT id, title, description, latitude, longitude, cosine_distance, is_below_threshold, below_threshold_total
+            FROM ordered
+            WHERE rn <= 3
+            ORDER BY rn;
         """
-        
-        cursor.execute(query, (query_vector,))
+
+        logger.info(
+            "[Node: RAG] threshold=%.4f 기준 유사 우선 후 거리순 최대 3건",
+            threshold,
+        )
+        cursor.execute(query, (query_vector, threshold, threshold, threshold))
         rows = cursor.fetchall()
-        
+
+        below_threshold_total = int(rows[0][7]) if rows else 0
+
         db_result = []
         for row in rows:
+            dist = float(row[5])
+            below = row[6]
+            is_below = bool(below) if below is not None else False
             db_result.append({
                 "id": row[0],
                 "name": row[1],
                 "desc": row[2],
                 "lat": row[3],
-                "lon": row[4]
+                "lon": row[4],
+                "cosine_distance": dist,
+                "is_below_threshold": is_below,
             })
             
         cursor.close()
         conn.close()
         ids_str = ", ".join(str(p["id"]) for p in db_result) if db_result else "(없음)"
+        matched_ids = [p["id"] for p in db_result]
+        similar_n = sum(1 for p in db_result if p.get("is_below_threshold"))
         logger.info(
-            "DB RAG: 유사도 Top %d 팝업 매칭 완료. popup_db_ids=[%s]",
+            "DB RAG: threshold=%.4f 미만 전체(기간 내) %d건, 반환 %d건(유사 %d / 일반 %d), matched_popup_ids=[%s]",
+            threshold,
+            below_threshold_total,
             len(db_result),
+            similar_n,
+            len(db_result) - similar_n,
             ids_str,
         )
         for rank, p in enumerate(db_result, start=1):
             title = p.get("name") or ""
             desc = p.get("desc") or ""
+            d = p.get("cosine_distance")
+            tier = "유사" if p.get("is_below_threshold") else "일반"
             logger.info(
-                "DB RAG: rank=%d id=%s preview_50=%s",
+                "DB RAG: rank=%d id=%s tier=%s cosine_distance=%.6f preview_50=%s",
                 rank,
                 p["id"],
+                tier,
+                d if d is not None else float("nan"),
                 _popup_preview_50(title, desc),
             )
-        return {"retrieved_popups": db_result}
+        return {"retrieved_popups": db_result, "matched_popup_ids": matched_ids}
 
     except Exception as e:
         logger.exception("DB 조인 검색 실패: %s", e)
-        return {"retrieved_popups": []}
+        return {"retrieved_popups": [], "matched_popup_ids": []}
 
 # [Node 3] 답변 생성
 def generate_recommendation(state: AgentState):
@@ -174,14 +223,24 @@ def generate_recommendation(state: AgentState):
     popups = state.get("retrieved_popups", [])
     history = state.get("history") or []
     
-    # 팝업 정보를 텍스트로 변환
-    context = "\n".join([f"- {p['name']}: {p['desc']}" for p in popups])
+    # 팝업 정보: 유사(threshold 미만) / 일반(거리순 보충) 태그로 구분
+    context_lines = []
+    for p in popups:
+        if p.get("is_below_threshold"):
+            context_lines.append(f"- [유사 추천] {p['name']}: {p['desc']}")
+        else:
+            context_lines.append(f"- [일반 추천] {p['name']}: {p['desc']}")
+    context = "\n".join(context_lines)
     history_context = "\n".join(history[-5:])
     
     prompt = f"""<|im_start|>system
-당신은 성수동 팝업스토어 전문 가이드입니다. 
+당신은 팝업스토어 전문 가이드입니다. 
 제공된 [팝업 목록]의 정보를 바탕으로 사용자의 질문에 친절하게 답하세요. 
 반드시 목록에 있는 장소들을 중심으로 설명해야 합니다.
+
+출력 형식 규칙:
+- [유사 추천] 항목은 질문과 관련이 높다고 보고, 본문에서 먼저·자세히 추천하세요.
+- [일반 추천] 항목이 있으면, 해당 장소를 소개할 때 문장을 "원하시는 정보는 아니지만, 추천할 만한 이벤트가 있어요."로 시작한 뒤 이어서 간단히 설명하세요. (일반 추천이 여러 개면 각각에 동일한 도입을 쓰지 말고 자연스럽게 묶거나 번갈아 표현해도 됩니다.)
 
 [팝업 목록]:
 {context}
