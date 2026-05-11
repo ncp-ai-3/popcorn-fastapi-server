@@ -2,7 +2,7 @@ import logging
 import uvicorn
 import httpx
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional
 
 from embedding_client import fetch_query_embedding
@@ -18,10 +18,16 @@ app = FastAPI()
 
 
 class SpringRequest(BaseModel):
+    # Spring에서 userId가 숫자(Long)로 오면 JSON에 숫자가 됨 → str로 통일
     userId: str
     question: str
     # 제공되면 임베딩 API를 호출하지 않고 해당 벡터 사용 (기존·로컬 테스트용)
     queryVector: Optional[List[float]] = None
+
+    @field_validator("userId", mode="before")
+    @classmethod
+    def user_id_as_str(cls, v):
+        return str(v) if v is not None else v
 
 
 def _embedding_preview_50(vec: List[float]) -> str:
