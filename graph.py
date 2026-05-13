@@ -2,8 +2,10 @@ import logging
 import os
 import psycopg2
 from dotenv import load_dotenv
+from datetime import datetime
 from llama_cpp import Llama
-from typing import TypedDict, List, NotRequired
+from typing import TypedDict, List
+from typing_extensions import NotRequired
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 import numpy as np
@@ -109,6 +111,32 @@ class AgentState(TypedDict):
 # [Node 1] 의도 파악
 def analyze_intent(state: AgentState):
     return {"intent": "popup_search"}
+
+# [추가] 사용자의 원본 질문에서 RAG 검색용 핵심 키워드만 추출하는 필터 함수
+def extract_search_keywords(query: str) -> str:
+    prompt = f"""<|im_start|>system
+당신은 검색 키워드 추출기입니다. 
+사용자의 질문에서 불필요한 서술어, 조사, 인사말은 모두 제거하고 띄어쓰기로만 구분된 핵심 명사(지역, 장소, 날짜, 이벤트 종류 등)만 출력하세요.
+<|im_end|>
+<|im_start|>user
+이번 주말에 부산에서 열리는 뷰티 팝업스토어 알려줘<|im_end|>
+<|im_start|>assistant
+이번 주말 부산 뷰티 팝업스토어<|im_end|>
+<|im_start|>user
+오늘 성수동에서 하는 캐릭터 팝업스토어 추천해줄래?<|im_end|>
+<|im_start|>assistant
+오늘 성수동 캐릭터 팝업스토어<|im_end|>
+<|im_start|>user
+내일 여의도 더현대에서 하는 음식 팝업 있어?<|im_end|>
+<|im_start|>assistant
+내일 여의도 더현대 음식 팝업<|im_end|>
+<|im_start|>user
+{query}<|im_end|>
+<|im_start|>assistant
+"""
+    # 추출은 짧게 끝내므로 max_tokens를 작게 설정
+    output = llm(prompt, max_tokens=64, stop=["<|im_end|>"], echo=False)
+    return output["choices"][0]["text"].strip()
 
 def _popup_preview_50(name: str, desc: str) -> str:
     """로그용: 제목·설명 앞 50자(개행은 공백으로)."""
@@ -233,8 +261,12 @@ def generate_recommendation(state: AgentState):
     context = "\n".join(context_lines)
     history_context = "\n".join(history[-5:])
     
+    # 현재 시간을 가져와서 프롬프트에 주입
+    current_time = datetime.now().strftime("%Y년 %m월 %d일 %H시 %M분")
+
     prompt = f"""<|im_start|>system
 당신은 팝업스토어 전문 가이드입니다. 
+    현재 시간은 {current_time}입니다. 사용자가 '오늘', '내일', '이번 주' 등의 일정을 물어보면 이 시간을 기준으로 답변하세요.
 제공된 [팝업 목록]의 정보를 바탕으로 사용자의 질문에 친절하게 답하세요. 
 반드시 목록에 있는 장소들을 중심으로 설명해야 합니다.
 
