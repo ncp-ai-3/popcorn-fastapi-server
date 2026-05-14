@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import psycopg2
 from dotenv import load_dotenv
 from datetime import datetime
@@ -14,6 +15,13 @@ import numpy as np
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+def _preview_for_log(text: str, max_chars: int = 4000) -> str:
+    """로그용: 긴 프롬프트는 앞부분만 남기고 길이 표시."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n... [{len(text) - max_chars} chars truncated]"
 
 
 def _db_password() -> str:
@@ -110,7 +118,15 @@ class AgentState(TypedDict):
 
 # [Node 1] 의도 파악
 def analyze_intent(state: AgentState):
-    return {"intent": "popup_search"}
+    t0 = time.perf_counter()
+    uq = state.get("user_query") or ""
+    logger.info("[Node:enter] analyze_intent user_query_preview=%r", uq[:200])
+    out = {"intent": "popup_search"}
+    logger.info(
+        "[Node:exit] analyze_intent elapsed_ms=%.1f",
+        (time.perf_counter() - t0) * 1000,
+    )
+    return out
 
 # [추가] 사용자의 원본 질문에서 RAG 검색용 핵심 키워드만 추출하는 필터 함수
 def extract_search_keywords(query: str) -> str:
@@ -134,9 +150,28 @@ def extract_search_keywords(query: str) -> str:
 {query}<|im_end|>
 <|im_start|>assistant
 """
+    logger.info(
+        "[LLM:keyword_extract] to_llm: original_query=%r prompt_len=%d prompt=\n%s",
+        query,
+        len(prompt),
+        _preview_for_log(prompt, max_chars=6000),
+    )
     # 추출은 짧게 끝내므로 max_tokens를 작게 설정
+    t_llm = time.perf_counter()
     output = llm(prompt, max_tokens=64, stop=["<|im_end|>"], echo=False)
-    return output["choices"][0]["text"].strip()
+    llm_ms = (time.perf_counter() - t_llm) * 1000
+    extracted = output["choices"][0]["text"].strip()
+    logger.info("[LLM:keyword_extract] from_llm: extracted_for_embedding=%r", extracted)
+    logger.info(
+        "[keyword_extract:done] llm_elapsed_ms=%.1f original_len=%d extracted_len=%d "
+        "original=%r -> extracted=%r",
+        llm_ms,
+        len(query),
+        len(extracted),
+        query,
+        extracted,
+    )
+    return extracted
 
 def _popup_preview_50(name: str, desc: str) -> str:
     """로그용: 제목·설명 앞 50자(개행은 공백으로)."""
@@ -148,15 +183,20 @@ def _popup_preview_50(name: str, desc: str) -> str:
 
 # [Node 2] 시현님 DB 구조에 맞춘 RAG 검색
 def retrieve_popups(state: AgentState):
+    t0 = time.perf_counter()
     query_vector = state.get("query_vector")
-    logger.info("[Node: RAG] 유사도 검색 시작 (벡터 길이=%s)", len(query_vector) if query_vector else 0)
-    
-    if not query_vector:
-        logger.warning("질문 벡터가 비어있습니다.")
-        return {"retrieved_popups": [], "matched_popup_ids": []}
-
-    threshold = _rag_cosine_distance_max()
+    logger.info(
+        "[Node:enter] retrieve_popups query_vector_len=%s",
+        len(query_vector) if query_vector else 0,
+    )
     try:
+        logger.info("[Node: RAG] 유사도 검색 시작 (벡터 길이=%s)", len(query_vector) if query_vector else 0)
+    
+        if not query_vector:
+            logger.warning("질문 벡터가 비어있습니다.")
+            return {"retrieved_popups": [], "matched_popup_ids": []}
+
+        threshold = _rag_cosine_distance_max()
         conn = get_db_connection()
         cursor = conn.cursor()
 
@@ -244,20 +284,34 @@ def retrieve_popups(state: AgentState):
     except Exception as e:
         logger.exception("DB 조인 검색 실패: %s", e)
         return {"retrieved_popups": [], "matched_popup_ids": []}
+    finally:
+        logger.info(
+            "[Node:exit] retrieve_popups elapsed_ms=%.1f",
+            (time.perf_counter() - t0) * 1000,
+        )
 
 # [Node 3] 답변 생성
 def generate_recommendation(state: AgentState):
+    t0 = time.perf_counter()
     query = state["user_query"]
     popups = state.get("retrieved_popups", [])
     history = state.get("history") or []
-    
-    # 팝업 정보: 유사(threshold 미만) / 일반(거리순 보충) 태그로 구분
-    context_lines = []
-    for p in popups:
+    logger.info(
+        "[Node:enter] generate popup_count=%d history_turns=%d user_query_preview=%r",
+        len(popups),
+        len(history),
+        (query or "")[:200],
+    )
+
+    # 팝업 목록: 메타 문구(=== 등) 없이 데이터만. 순서는 DB 반환(유사 우선) 유지.
+    context_lines: list[str] = []
+    for i, p in enumerate(popups):
         if p.get("is_below_threshold"):
-            context_lines.append(f"- [유사 추천] {p['name']}: {p['desc']}")
+            context_lines.append(f"[추천 {i + 1}] {p['name']} - {p['desc']}")
         else:
-            context_lines.append(f"- [일반 추천] {p['name']}: {p['desc']}")
+            context_lines.append(f"[참고 {i + 1}] {p['name']} - {p['desc']}")
+    if not context_lines:
+        context_lines.append("(해당하는 팝업스토어 없음)")
     context = "\n".join(context_lines)
     history_context = "\n".join(history[-5:])
     
@@ -265,14 +319,18 @@ def generate_recommendation(state: AgentState):
     current_time = datetime.now().strftime("%Y년 %m월 %d일 %H시 %M분")
 
     prompt = f"""<|im_start|>system
-당신은 팝업스토어 전문 가이드입니다. 
-    현재 시간은 {current_time}입니다. 사용자가 '오늘', '내일', '이번 주' 등의 일정을 물어보면 이 시간을 기준으로 답변하세요.
-제공된 [팝업 목록]의 정보를 바탕으로 사용자의 질문에 친절하게 답하세요. 
-반드시 목록에 있는 장소들을 중심으로 설명해야 합니다.
+당신은 팝업스토어를 소개하는 친절하고 자연스러운 대화형 AI 가이드입니다.
+현재 시간은 {current_time}입니다. 일정은 이 시간을 기준으로 판단하세요.
 
-출력 형식 규칙:
-- [유사 추천] 항목은 질문과 관련이 높다고 보고, 본문에서 먼저·자세히 추천하세요.
-- [일반 추천] 항목이 있으면, 해당 장소를 소개할 때 문장을 "원하시는 정보는 아니지만, 추천할 만한 이벤트가 있어요."로 시작한 뒤 이어서 간단히 설명하세요. (일반 추천이 여러 개면 각각에 동일한 도입을 쓰지 말고 자연스럽게 묶거나 번갈아 표현해도 됩니다.)
+[답변 작성 규칙]
+1. [팝업 목록]에 있는 정보만 사용하여 답변하세요. 목록이 비었거나 안내 문구만 있으면, 그 사실을 짧게 말하고 지어내지 마세요.
+2. 옆 사람에게 말하듯 문장으로만 이어 쓰세요. "1. 2. 3." 식 번호 매기기나 마크다운 표는 쓰지 마세요. 목록 앞의 [추천 N], [참고 N]은 구분용이니 **답변에는 그대로 가져오지 말고** 팝업 이름으로만 부르세요.
+3. [추천]이 붙은 줄을 먼저 자세히 소개하고, [참고]가 붙은 줄은 뒤에 짧게 덧붙이거나 생략해도 됩니다.
+4. 설명이 길면 한두 문장으로 핵심만 요약해 자연스럽게 말해 주세요. 전시·매장·행사 등 설명에 맞는 말로 쓰면 됩니다.
+
+[대화 예시]
+User: 성수동 근처에 구경할 만한 곳 있어?
+Assistant: 성수 쪽이시면 '무드 라이트 팝업'을 가장 추천해 드려요. 예쁜 조명과 소품을 직접 체험해 볼 수 있거든요. 시간이 조금 남으신다면 근처에서 한정 굿즈를 파는 '스프링 굿즈 마켓'도 가볍게 둘러보시기 좋아요.
 
 [팝업 목록]:
 {context}
@@ -284,11 +342,35 @@ def generate_recommendation(state: AgentState):
 {query}<|im_end|>
 <|im_start|>assistant
 """
+    logger.info(
+        "[LLM:recommend] to_llm: injected_current_time=%r user_query=%r "
+        "popup_count=%d history_lines=%d context_chars=%d history_chars=%d prompt_len=%d",
+        current_time,
+        query,
+        len(popups),
+        len(history),
+        len(context),
+        len(history_context),
+        len(prompt),
+    )
+    logger.info("[LLM:recommend] to_llm: context_block=\n%s", _preview_for_log(context, 2500))
+    logger.info(
+        "[LLM:recommend] to_llm: history_block=\n%s",
+        _preview_for_log(history_context or "(비어 있음)", 1500),
+    )
+    logger.info("[LLM:recommend] to_llm: full_prompt=\n%s", _preview_for_log(prompt, 8000))
     output = llm(prompt, max_tokens=512, stop=["<|im_end|>"], echo=False)
     answer = output["choices"][0]["text"].strip()
-    
+    if answer.startswith("AI:"):
+        answer = answer[3:].lstrip()
+
     new_history = history + [f"User: {query}", f"AI: {answer}"]
-    
+
+    logger.info(
+        "[Node:exit] generate elapsed_ms=%.1f answer_chars=%d",
+        (time.perf_counter() - t0) * 1000,
+        len(answer),
+    )
     return {
         "final_answer": answer,
         "history": new_history

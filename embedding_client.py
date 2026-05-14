@@ -1,10 +1,14 @@
+import logging
 import os
+import time
 from typing import List
 
 import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = "/api/v1/embed"
 _DEFAULT_TIMEOUT = 30.0
@@ -37,12 +41,20 @@ async def fetch_query_embedding(text: str) -> List[float]:
     url = _embed_url()
     timeout = httpx.Timeout(_timeout_seconds())
     payload = {"text": text or ""}
-
+    raw = text or ""
+    logger.info(
+        "[embedding:enter] embedding_client POST %s text_len=%d text_preview=%r",
+        url,
+        len(raw),
+        raw[:500] + ("…" if len(raw) > 500 else ""),
+    )
+    t0 = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout, verify=_verify_tls()) as client:
         response = await client.post(url, json=payload)
         response.raise_for_status()
         data = response.json()
 
+    http_ms = (time.perf_counter() - t0) * 1000
     embedding = data.get("embedding")
     if not isinstance(embedding, list) or len(embedding) == 0:
         raise ValueError("embedding API response: missing or empty 'embedding'")
@@ -53,4 +65,9 @@ async def fetch_query_embedding(text: str) -> List[float]:
         raise ValueError(
             f"embedding dimension mismatch: expected {expected}, got {len(vec)}"
         )
+    logger.info(
+        "[embedding:exit] embedding_client http_elapsed_ms=%.1f dim=%d",
+        http_ms,
+        len(vec),
+    )
     return vec

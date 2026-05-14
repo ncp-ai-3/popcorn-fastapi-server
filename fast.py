@@ -57,8 +57,13 @@ async def chat(request: SpringRequest):
         try:
             # 1. RAG 검색 품질을 높이기 위해 LLM으로 핵심 키워드 먼저 추출
             search_keywords = await asyncio.to_thread(extract_search_keywords, request.question)
-            logger.info("[embedding] extracted keywords: '%s' (original: '%s')", search_keywords, request.question)
-            
+            logger.info(
+                "[embedding:enter] fastapi -> embed_api "
+                "original_question=%r embed_text=%r embed_text_len=%d",
+                request.question,
+                search_keywords,
+                len(search_keywords or ""),
+            )
             # 2. 추출된 정제 키워드로 벡터 임베딩 생성
             query_vector = await fetch_query_embedding(search_keywords)
         except ValueError as e:
