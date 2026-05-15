@@ -1,5 +1,13 @@
-# NCP VM: Docker 설치 후 이 디렉터리에서 사용. ACG(보안 그룹)에서 8000(또는 리버스 프록시 시 80/443) 인바운드 허용.
-# 배포 전: cp .env.example .env 후 값 채우기. GGUF는 ./models/ 에 두거나 볼륨·LLM_MODEL_PATH 를 맞춤.
+# NCP VM: 이 디렉터리에서 `docker compose up -d --build`. ACG에서 8000(또는 프록시 80/443) 인바운드 허용.
+#
+# 배포 전 .env (cp .env.example .env 후 채움):
+#   - DB_HOST, DB_NAME, DB_USER, DB_PASS(또는 DB_PASSWORD), DB_PORT
+#   - EMBED_API_BASE_URL (필수), EMBED_API_PATH·EMBED_API_VERIFY_TLS·EMBED_API_TIMEOUT_SECONDS·EMBEDDING_DIMENSION
+#   - LLM_MODEL_PATH (기본: /app/models/... 아래 GGUF), LLM_N_GPU_LAYERS, LLM_N_CTX
+#   - LLM_GENERATE_MAX_TOKENS (추천 답변 길이, graph/nodes_generate.py, 미설정 시 Dockerfile·코드 기본 1024)
+#   - 선택: RAG_COSINE_DISTANCE_MAX
+#
+# GGUF는 호스트 ./models/ 에 두고 아래 볼륨으로 마운트하거나, 다른 경로를 쓰면 .env 의 LLM_MODEL_PATH 를 컨테이너 내부 경로에 맞출 것.
 services:
   api:
     build: .
@@ -8,9 +16,8 @@ services:
     env_file:
       - .env
     environment:
+      # compose 의 environment 는 env_file(.env)보다 우선합니다. GPU 사용 시 값 변경 또는 이 블록에서 제거하세요.
       LLM_N_GPU_LAYERS: "0"
     volumes:
-      # 호스트에 models/qwen2-1_5b-instruct-q4_k_m.gguf 를 두거나, 다른 경로를 마운트한 뒤
-      # LLM_MODEL_PATH 를 컨테이너 내부 경로에 맞게 .env 에 설정하세요.
       - ./models:/app/models:ro
     restart: unless-stopped

@@ -227,7 +227,7 @@ docker compose up -d --build
 
 ### 3.1 Git에 포함 (저장소에 push)
 
-- 애플리케이션 코드: `fast.py`, `graph.py`, `embedding_client.py` 등
+- 애플리케이션 코드: `fast.py`, `graph/` 패키지, `embedding_client.py` 등
 - 컨테이너 정의: `Dockerfile`, `docker-compose.yml`, `.dockerignore`, `requirements-docker.txt`
 - 예시 환경변수: `.env.example` (비밀 값 없음)
 - 보조 스크립트: `scripts/download_model.sh` 등
@@ -245,7 +245,7 @@ docker compose up -d --build
 
 ### 3.3 `.env`에 넣을 변수 (요약)
 
-`graph.py` / `embedding_client.py` 기준:
+`graph/` 패키지 / `embedding_client.py` 기준:
 
 - **DB**: `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASS` 또는 `DB_PASSWORD`, `DB_PORT`
 - **임베딩 API**: `EMBED_API_BASE_URL` (필수), 필요 시 `EMBED_API_PATH`, `EMBED_API_VERIFY_TLS`, `EMBED_API_TIMEOUT_SECONDS`, `EMBEDDING_DIMENSION`
@@ -270,7 +270,7 @@ docker compose up -d --build
     ├── docker-compose.yml
     ├── requirements-docker.txt
     ├── fast.py
-    ├── graph.py
+    ├── graph/
     ├── embedding_client.py
     ├── .env                            # VM에서만 생성·편집 (Git 제외)
     ├── .env.example                    # Git에서 옴

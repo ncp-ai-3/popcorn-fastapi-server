@@ -1,13 +1,12 @@
 import logging
-import uvicorn
+from typing import Any, List, Optional
+
 import httpx
-import asyncio
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
-from typing import List, Optional
 
-from embedding_client import fetch_query_embedding
-from graph import app as langgraph_app, extract_search_keywords
+from graph import app as langgraph_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,10 +18,8 @@ app = FastAPI()
 
 
 class SpringRequest(BaseModel):
-    # Spring에서 userId가 숫자(Long)로 오면 JSON에 숫자가 됨 → str로 통일
     userId: str
     question: str
-    # 제공되면 임베딩 API를 호출하지 않고 해당 벡터 사용 (기존·로컬 테스트용)
     queryVector: Optional[List[float]] = None
 
     @field_validator("userId", mode="before")
@@ -40,56 +37,76 @@ def _embedding_preview_50(vec: List[float]) -> str:
     return s[:50]
 
 
+def _popups_db_summary(popups: list[dict[str, Any]]) -> str:
+    """로그 한 줄용: id, title, cosine_distance, desc 앞 50자."""
+    parts: list[str] = []
+    for p in popups or []:
+        cd = p.get("cosine_distance")
+        cos = "n/a" if cd is None else f"{float(cd):.4f}"
+        title = (p.get("name") or "")[:80]
+        desc = (p.get("desc") or "").replace("\n", " ")[:50]
+        parts.append(f"id={p['id']} title={title!r} cos={cos} desc50={desc!r}")
+    return " | ".join(parts) if parts else "(없음)"
+
+
+def _log_chat_summary(*, user_id: str, question: str, result: dict[str, Any]) -> None:
+    route = result.get("route")
+    vec = result.get("condition_vector")
+    mode = result.get("retrieval_mode")
+    embed_text = result.get("embed_text_used")
+    if not embed_text:
+        embed_text = "(임베딩 단계 없음·최근목록 경로 등)"
+    qv = result.get("query_vector")
+    if isinstance(qv, list) and qv:
+        emb = f"dim={len(qv)} preview={_embedding_preview_50(qv)}"
+    else:
+        emb = "벡터없음"
+    pops = result.get("retrieved_popups") or []
+    ans = (result.get("final_answer") or "")[:50].replace("\n", " ")
+    logger.info(
+        "[chat] userId=%s 입력=%r 라우트=%s condition_vector=%s retrieval_mode=%s "
+        "임베딩문장=%r 임베딩=%s DB=[%s] 답변50자=%r",
+        user_id,
+        question,
+        route,
+        vec,
+        mode,
+        embed_text,
+        emb,
+        _popups_db_summary(pops),
+        ans + ("…" if len(result.get("final_answer") or "") > 50 else ""),
+    )
+
+
 @app.post("/chat")
 async def chat(request: SpringRequest):
     config = {"configurable": {"thread_id": request.userId}}
 
-    logger.info(
-        "[chat] userId=%s user_message=%s",
-        request.userId,
-        request.question,
-    )
-
+    inputs: dict = {
+        "user_query": request.question,
+        "skip_embedding": False,
+    }
     if request.queryVector is not None:
-        query_vector = request.queryVector
-        logger.info("[embedding] source=client_body dim=%d preview_50=%s", len(query_vector), _embedding_preview_50(query_vector))
-    else:
-        try:
-            # 1. RAG 검색 품질을 높이기 위해 LLM으로 핵심 키워드 먼저 추출
-            search_keywords = await asyncio.to_thread(extract_search_keywords, request.question)
-            logger.info(
-                "[embedding:enter] fastapi -> embed_api "
-                "original_question=%r embed_text=%r embed_text_len=%d",
-                request.question,
-                search_keywords,
-                len(search_keywords or ""),
-            )
-            # 2. 추출된 정제 키워드로 벡터 임베딩 생성
-            query_vector = await fetch_query_embedding(search_keywords)
-        except ValueError as e:
-            raise HTTPException(status_code=500, detail=str(e))
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"embedding API HTTP {e.response.status_code}",
-            )
-        except httpx.RequestError as e:
-            raise HTTPException(
-                status_code=503,
-                detail=f"embedding API unreachable: {e.__class__.__name__}",
-            )
-        logger.info(
-            "[embedding] source=embed_api dim=%d preview_50=%s",
-            len(query_vector),
-            _embedding_preview_50(query_vector),
+        inputs["query_vector"] = request.queryVector
+        inputs["skip_embedding"] = True
+        inputs["embed_text_used"] = "<client_query_vector>"
+
+    try:
+        result = await langgraph_app.ainvoke(inputs, config=config)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"embedding API HTTP {e.response.status_code}",
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"embedding API unreachable: {e.__class__.__name__}",
         )
 
-    inputs = {
-        "user_query": request.question,
-        "query_vector": query_vector,
-    }
-
-    result = langgraph_app.invoke(inputs, config=config)
+    _log_chat_summary(user_id=request.userId, question=request.question, result=result)
 
     return {
         "answer": result.get("final_answer"),

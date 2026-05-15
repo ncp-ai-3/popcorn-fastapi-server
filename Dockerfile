@@ -12,10 +12,13 @@ RUN pip install --no-cache-dir -r requirements-docker.txt \
     llama-cpp-python \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
-COPY fast.py graph.py embedding_client.py ./
+COPY fast.py embedding_client.py ./
+COPY graph ./graph/
 
 ENV LLM_N_GPU_LAYERS=0
 ENV LLM_MODEL_PATH=/app/models/qwen2-1_5b-instruct-q4_k_m.gguf
+ENV LLM_N_CTX=2048
+ENV LLM_GENERATE_MAX_TOKENS=1024
 
 EXPOSE 8000
 

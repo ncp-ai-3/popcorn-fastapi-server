@@ -42,11 +42,11 @@ async def fetch_query_embedding(text: str) -> List[float]:
     timeout = httpx.Timeout(_timeout_seconds())
     payload = {"text": text or ""}
     raw = text or ""
-    logger.info(
-        "[embedding:enter] embedding_client POST %s text_len=%d text_preview=%r",
+    logger.debug(
+        "[embedding:client] POST %s text_len=%d text_preview=%r",
         url,
         len(raw),
-        raw[:500] + ("…" if len(raw) > 500 else ""),
+        raw[:200] + ("…" if len(raw) > 200 else ""),
     )
     t0 = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout, verify=_verify_tls()) as client:
@@ -65,8 +65,8 @@ async def fetch_query_embedding(text: str) -> List[float]:
         raise ValueError(
             f"embedding dimension mismatch: expected {expected}, got {len(vec)}"
         )
-    logger.info(
-        "[embedding:exit] embedding_client http_elapsed_ms=%.1f dim=%d",
+    logger.debug(
+        "[embedding:client] http_elapsed_ms=%.1f dim=%d",
         http_ms,
         len(vec),
     )
