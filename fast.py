@@ -20,9 +20,14 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _log_startup_chat_llm_config() -> None:
-    from config.chat_llm import get_chat_llm_config
+    from config.chat_llm import chat_state_ttl_seconds, get_chat_llm_config
 
     get_chat_llm_config()
+    ttl = chat_state_ttl_seconds()
+    if ttl > 0:
+        logger.info("[startup] chat state TTL enabled: %.0fs (CHAT_STATE_TTL_SECONDS)", ttl)
+    else:
+        logger.info("[startup] chat state TTL disabled (CHAT_STATE_TTL_SECONDS=0)")
     logger.info("[startup] chat LLM config loaded (see [chat_llm_config] above)")
 
 
@@ -89,7 +94,12 @@ def _log_chat_summary(*, user_id: str, question: str, result: dict[str, Any]) ->
 
 @app.post("/chat")
 async def chat(request: SpringRequest):
-    config = {"configurable": {"thread_id": request.userId}}
+    thread_id = request.userId
+    config = {"configurable": {"thread_id": thread_id}}
+
+    from graph.thread_ttl import expire_thread_if_idle, touch_thread
+
+    await expire_thread_if_idle(langgraph_app.checkpointer, thread_id)
 
     inputs: dict = {
         "user_query": request.question,
@@ -142,6 +152,7 @@ async def chat(request: SpringRequest):
             detail=f"{type(e).__name__}: {e}",
         ) from e
 
+    touch_thread(thread_id)
     _log_chat_summary(user_id=request.userId, question=request.question, result=result)
 
     return {

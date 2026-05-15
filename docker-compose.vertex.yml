@@ -1,10 +1,7 @@
-# Vertex AI 사용 시에만 합쳐서 실행 (JSON은 이미지·git에 넣지 않음):
-#   docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d --build
+# (레거시) Vertex 설정은 docker-compose.yml 에 포함되었습니다.
+# 더 이상 -f docker-compose.vertex.yml 은 필요 없습니다.
 #
-# 사전 준비: secrets/gcp-vertex-sa.json (git 제외) — 로컬과 동일 파일명·경로
-services:
-  api:
-    environment:
-      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
-    volumes:
-      - ${GCP_SA_KEY_HOST_PATH:-./secrets/gcp-vertex-sa.json}:/run/secrets/gcp-sa.json:ro
+#   docker compose up -d --build
+#
+# 호스트 SA 키 경로만 .env 에 지정:
+#   GCP_SA_KEY_HOST_PATH=./secrets/본인키파일.json

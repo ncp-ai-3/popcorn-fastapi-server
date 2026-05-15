@@ -201,6 +201,11 @@ def chat_request_timeout_seconds() -> float:
     return max(1.0, _env_float("CHAT_REQUEST_TIMEOUT_SECONDS", 40.0))
 
 
+def chat_state_ttl_seconds() -> float:
+    """LangGraph thread(checkpoint) 미사용 TTL(초). 초과 시 search_conditions·history 삭제. 0=비활성."""
+    return max(0.0, _env_float("CHAT_STATE_TTL_SECONDS", 1800.0))
+
+
 def llm_call_timeout_seconds() -> float:
     """단일 LLM 호출(Vertex·로컬 Llama) 상한(초)."""
     return max(1.0, _env_float("LLM_CALL_TIMEOUT_SECONDS", 40.0))
