@@ -2,8 +2,8 @@
 
 from typing import Any, List, NotRequired, Tuple, TypedDict
 
-# 추천 LLM: 턴마다 User/AI 두 줄 → N턴 = 2N줄
-RECOMMEND_HISTORY_TURNS = 2
+# 추천 LLM: 프롬프트에 넣을 과거 대화 — 직전 1턴(User·AI 한 쌍)만 = 2줄
+RECOMMEND_HISTORY_TURNS = 1
 
 # 라우트 문자열
 ROUTE_ACTION = "action"

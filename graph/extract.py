@@ -258,10 +258,35 @@ def _slot_nonempty_for_embed(v: Any) -> bool:
     return v is not None and str(v).strip() != ""
 
 
+def _merge_embed_lines(a: str, b: str, max_len: int = 256) -> str:
+    """검색용 두 줄을 어절로 합치며 중복 토큰 제거(순서: a 먼저)."""
+    if not (a or "").strip():
+        return ((b or "").strip())[:max_len]
+    if not (b or "").strip():
+        return ((a or "").strip())[:max_len]
+
+    def toks(x: str) -> list[str]:
+        return [t for t in re.split(r"\s+", x.strip()) if t]
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks(a) + toks(b):
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    s = " ".join(out).strip()
+    return s if len(s) <= max_len else s[:max_len]
+
+
 def _embedding_output_suspicious(text: str) -> bool:
     t = (text or "").strip()
     if not t or len(t) > 256:
         return True
+    # 짧은 줄에서만: 모델이 "없습니다" 한 마디만 내는 경우 등 (긴 검색문 안의 부정은 허용)
+    if len(t) <= 48:
+        for n in ("없습니다", "없어요", "없다"):
+            if n in t:
+                return True
     needles = (
         "불가능",
         "도와드릴 수 없",
@@ -271,15 +296,9 @@ def _embedding_output_suspicious(text: str) -> bool:
         "죄송",
         "sorry",
         "cannot",
-        "없습니다",
-        "없어요",
-        "없다",
         "찾을 수 없",
         "팝업은 없",
         "팝업이 없",
-        "는가",
-        "인가",
-        "일까",
     )
     tl = t.lower()
     for n in needles:
@@ -289,6 +308,33 @@ def _embedding_output_suspicious(text: str) -> bool:
 
 
 def _fallback_embed_line_from_conditions(query: str, sc: dict[str, Any]) -> str:
+    bits: list[str] = []
+    for k in ("category", "location", "start_date", "end_date"):
+        v = sc.get(k)
+        if _slot_nonempty_for_embed(v):
+            bits.append(str(v).strip())
+    s = " ".join(bits).strip()
+    if s and "팝업" not in s and "popup" not in s.lower():
+        s += " 팝업"
+    slot_part = s.strip()
+    q = (query or "").strip()
+
+    # category 가 비면 JSON만으로는 주제(예: 화장품)가 빠지므로 원문 키워드 추출과 합침
+    if not _slot_nonempty_for_embed(sc.get("category")) and q:
+        kw = extract_search_keywords(q).strip()
+        if kw:
+            merged = _merge_embed_lines(slot_part, kw) if slot_part else kw
+            if merged:
+                return merged[:256]
+
+    return slot_part if slot_part else q
+
+
+def embedding_text_without_llm(
+    query: str, search_conditions: dict[str, Any] | None
+) -> str:
+    """임베딩 API용 한 줄. LLM 없이 search_conditions 슬롯만 조합하고, 비면 원문 질문."""
+    sc = dict(search_conditions) if search_conditions else {}
     bits: list[str] = []
     for k in ("category", "location", "start_date", "end_date"):
         v = sc.get(k)
