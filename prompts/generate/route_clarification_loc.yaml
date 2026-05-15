@@ -1,0 +1,10 @@
+generate_route_clarification_loc:
+  route_extra: |
+    [이번 턴 역할] 사용자가 '{category}' 쪽을 찾는 것 같습니다. 팝업 목록은 없으므로 행사명을 말하지 말고, **어느 지역**에서 찾으실지 짧게 물어보세요.
+    답변 마무리에 방문 시기나 다른 관심사를 알려주시면 더 좋다고 한 문장만 덧붙이세요.
+  few_shots:
+    - user: 뷰티 팝업 있어?
+      assistant: |
+        {answer_open}
+        뷰티 쪽으로 보시는군요. 어느 지역에서 찾으실지 알려주시면 그에 맞춰 볼게요.
+        {answer_close}

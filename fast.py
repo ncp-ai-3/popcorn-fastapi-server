@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -15,6 +16,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+def _log_startup_chat_llm_config() -> None:
+    from config.chat_llm import get_chat_llm_config
+
+    get_chat_llm_config()
+    logger.info("[startup] chat LLM config loaded (see [chat_llm_config] above)")
 
 
 class SpringRequest(BaseModel):
@@ -91,8 +100,27 @@ async def chat(request: SpringRequest):
         inputs["skip_embedding"] = True
         inputs["embed_text_used"] = "<client_query_vector>"
 
+    from config.chat_llm import chat_request_timeout_seconds
+    from graph.recommend_llm import LLMCallTimeoutError
+
+    chat_timeout = chat_request_timeout_seconds()
     try:
-        result = await langgraph_app.ainvoke(inputs, config=config)
+        result = await asyncio.wait_for(
+            langgraph_app.ainvoke(inputs, config=config),
+            timeout=chat_timeout,
+        )
+    except asyncio.TimeoutError as e:
+        logger.error(
+            "[chat] request timeout after %.1fs (CHAT_REQUEST_TIMEOUT_SECONDS)",
+            chat_timeout,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"요청 처리 시간이 {chat_timeout:.0f}초를 초과했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from e
+    except LLMCallTimeoutError as e:
+        logger.error("[chat] %s", e)
+        raise HTTPException(status_code=504, detail=str(e)) from e
     except ValueError as e:
         # 임베딩 차원 불일치·EMBED 설정 누락 등 (embedding_client.fetch_query_embedding)
         logger.warning("chat ValueError: %s", e)

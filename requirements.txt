@@ -8,4 +8,7 @@ langgraph
 llama-cpp-python
 psycopg2-binary
 python-dotenv
+PyYAML>=6.0
 sentence-transformers
+# RECOMMEND_LLM_BACKEND=vertex 일 때: pip install google-cloud-aiplatform
+google-cloud-aiplatform>=1.60.0

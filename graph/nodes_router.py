@@ -9,6 +9,7 @@ from typing import Any
 from graph.extract import (
     augment_action_extracted,
     coerce_intent_for_popup_queries,
+    coerce_off_topic_to_out_of_domain,
     compose_embedding_text_from_search_conditions,
     embedding_text_without_llm,
     extract_intent_and_conditions,
@@ -39,6 +40,7 @@ def router_node(state: AgentState) -> dict[str, Any]:
 
     extracted_fresh = extract_intent_and_conditions(query)
     extracted_fresh = coerce_intent_for_popup_queries(query, extracted_fresh)
+    extracted_fresh = coerce_off_topic_to_out_of_domain(query, extracted_fresh)
     extracted_fresh = augment_action_extracted(query, extracted_fresh)
     extracted_fresh = normalize_extracted_category(extracted_fresh)
     extracted_fresh = strip_ungrounded_category(query, extracted_fresh)

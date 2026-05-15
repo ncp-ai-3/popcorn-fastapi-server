@@ -6,6 +6,7 @@
 #   - LLM_MODEL_PATH (기본: /app/models/... 아래 GGUF), LLM_N_GPU_LAYERS, LLM_N_CTX
 #   - LLM_GENERATE_MAX_TOKENS (추천 답변 길이, graph/nodes_generate.py, 미설정 시 Dockerfile·코드 기본 1024)
 #   - 선택: RAG_COSINE_DISTANCE_MAX
+#   - Vertex + 서비스 계정 JSON: docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d
 #
 # GGUF는 호스트 ./models/ 에 두고 아래 볼륨으로 마운트하거나, 다른 경로를 쓰면 .env 의 LLM_MODEL_PATH 를 컨테이너 내부 경로에 맞출 것.
 services:

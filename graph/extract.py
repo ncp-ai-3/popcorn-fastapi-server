@@ -7,11 +7,82 @@ import time
 from datetime import datetime
 from typing import Any
 
-from graph.model import get_llm
+from config.prompt_loader import build_chatml, load_prompts, render_template
+from graph.recommend_llm import complete_extract_prompt
 
 logger = logging.getLogger(__name__)
 
 _STOP = ["<|im_end|>"]
+
+
+def _llm_complete(prompt: str, *, max_tokens: int) -> str:
+    return complete_extract_prompt(
+        prompt,
+        max_tokens=max_tokens,
+        stop_sequences=_STOP,
+    )
+
+
+def _log_intent_extract_prompt_stats(prompt: str, query: str) -> None:
+    """의도 추출 LLM 호출 직전: system 블록 / few-shot / 마지막 질문 블록 글자 수."""
+    sys_open = "<|im_start|>system\n"
+    sys_close = "<|im_end|>"
+    s = prompt.find(sys_open)
+    e = prompt.find(sys_close, s + 1) if s >= 0 else -1
+    if s < 0 or e < 0:
+        logger.info("[LLM:intent_extract] prompt_chars total=%d (구간분석_생략)", len(prompt))
+        return
+    system_body = prompt[s : e + len(sys_close)]
+    tail_marker = f"<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
+    if prompt.endswith(tail_marker):
+        mid = prompt[e + len(sys_close) : -len(tail_marker)]
+        logger.info(
+            "[LLM:intent_extract] prompt_chars system=%d fewshot_예시=%d 마지막질문_블록=%d total=%d",
+            len(system_body),
+            len(mid),
+            len(tail_marker),
+            len(prompt),
+        )
+    else:
+        mid = prompt[e + len(sys_close) :]
+        logger.info(
+            "[LLM:intent_extract] prompt_chars system=%d 나머지=%d total=%d",
+            len(system_body),
+            len(mid),
+            len(prompt),
+        )
+
+
+def _log_embed_compose_prompt_stats(prompt: str) -> None:
+    """임베딩 문장 compose LLM: system 쪽 / user 이후."""
+    u = "<|im_start|>user\n"
+    i = prompt.find(u)
+    if i < 0:
+        logger.info("[LLM:embed_compose] prompt_chars total=%d", len(prompt))
+        return
+    sys_part = prompt[: i + len(u)]
+    rest = prompt[i + len(u) :]
+    logger.info(
+        "[LLM:embed_compose] prompt_chars system_및_user_태그까지=%d user본문_및_assistant=%d total=%d",
+        len(sys_part),
+        len(rest),
+        len(prompt),
+    )
+
+
+def _log_keyword_extract_prompt_stats(prompt: str, query: str) -> None:
+    """검색 키워드 추출 LLM."""
+    tail = f"<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
+    if prompt.endswith(tail):
+        head = prompt[: -len(tail)]
+        logger.info(
+            "[LLM:keyword_extract] prompt_chars 예시_prefix=%d 마지막질문_블록=%d total=%d",
+            len(head),
+            len(tail),
+            len(prompt),
+        )
+    else:
+        logger.info("[LLM:keyword_extract] prompt_chars total=%d", len(prompt))
 
 
 def _preview_for_log(text: str, max_chars: int = 4000) -> str:
@@ -122,6 +193,41 @@ _CATEGORY_VALUE_ALIASES: dict[str, str] = {
 }
 
 
+def _query_mentions_popup(q: str) -> bool:
+    q_lower = q.lower()
+    return (
+        "팝업" in q
+        or "팝업스토어" in q
+        or "팝업 스토어" in q
+        or "pop-up" in q_lower
+        or "popup" in q_lower
+    )
+
+
+# 질문에 팝업 표현이 없고, 아래 주제만 있으면 out_of_domain (DB category 와 무관).
+_OUT_OF_DOMAIN_TOPIC_NEEDLES: tuple[str, ...] = (
+    "자동차",
+    "차량",
+    "오토모빌",
+    "주식",
+    "코인",
+    "비트코인",
+    "암호화폐",
+    "부동산",
+    "아파트 분양",
+    "날씨",
+    "기상",
+    "코딩",
+    "프로그래밍",
+    "파이썬",
+    "자바",
+    "주식시장",
+    "정치",
+    "대통령",
+    "환율",
+)
+
+
 def coerce_intent_for_popup_queries(query: str, extracted: dict[str, Any]) -> dict[str, Any]:
     """질문에 팝업 관련 표현이 있는데 LLM이 out_of_domain/chitchat으로 준 경우 → action 보정."""
     raw = (extracted.get("intent") or "").strip().lower()
@@ -130,21 +236,53 @@ def coerce_intent_for_popup_queries(query: str, extracted: dict[str, Any]) -> di
     q = (query or "").strip()
     if not q:
         return extracted
-    q_lower = q.lower()
-    popup_kw = (
-        "팝업" in q
-        or "팝업스토어" in q
-        or "팝업 스토어" in q
-        or "pop-up" in q_lower
-        or "popup" in q_lower
-    )
-    if raw in ("out_of_domain", "chitchat") and popup_kw:
+    if raw in ("out_of_domain", "chitchat") and _query_mentions_popup(q):
         logger.info(
             "[intent_coerce] was=%s -> action (popup-related wording) q=%r",
             raw,
             q[:200],
         )
         return {**extracted, "intent": "action"}
+    return extracted
+
+
+def coerce_off_topic_to_out_of_domain(
+    query: str, extracted: dict[str, Any]
+) -> dict[str, Any]:
+    """팝업 DB 주제가 아닌 질문(자동차·주식 등) → out_of_domain. '팝업'이 있으면 적용 안 함."""
+    q = (query or "").strip()
+    if not q or _query_mentions_popup(q):
+        return extracted
+    if (extracted.get("intent") or "").strip().lower() == "out_of_domain":
+        return extracted
+    for needle in _OUT_OF_DOMAIN_TOPIC_NEEDLES:
+        if needle in q:
+            logger.info(
+                "[intent_coerce] -> out_of_domain (off-topic needle=%r) q=%r",
+                needle,
+                q[:200],
+            )
+            return {
+                "intent": "out_of_domain",
+                "category": None,
+                "start_date": None,
+                "end_date": None,
+                "location": None,
+            }
+    cat = extracted.get("category")
+    if cat is not None and str(cat).strip() and str(cat).strip() not in DB_POPUP_CATEGORIES:
+        logger.info(
+            "[intent_coerce] -> out_of_domain (category not in DB) category=%r q=%r",
+            cat,
+            q[:200],
+        )
+        return {
+            "intent": "out_of_domain",
+            "category": None,
+            "start_date": None,
+            "end_date": None,
+            "location": None,
+        }
     return extracted
 
 
@@ -181,66 +319,65 @@ def normalize_extracted_category(extracted: dict[str, Any]) -> dict[str, Any]:
 
 
 def strip_ungrounded_category(query: str, extracted: dict[str, Any]) -> dict[str, Any]:
-    """질문에 근거 없는 category면 제거 (지역만 묻는데 뷰티 등으로 채운 환각 방지)."""
+    """category 의미 매핑은 LLM에 위임. 코드는 DB 멤버십만 검사한다.
+
+    LLM이 동의어를 정확히 13개 DB 카테고리로 매핑했는지 신뢰하고, 목록 밖 라벨만 환각으로
+    간주해 null로 떨어뜨린다. 단어 근거 휴리스틱은 제거됨 (예: "먹거리" 같은 동의어가 사전에
+    없어도 통과시키기 위해).
+    """
     if (extracted.get("intent") or "").strip().lower() != "action":
         return extracted
     cat = extracted.get("category")
     if cat is None or not str(cat).strip():
         return extracted
     cat_s = str(cat).strip()
-    q = query or ""
-    if cat_s in q:
+    if cat_s in DB_POPUP_CATEGORIES:
         return extracted
-    for needle, mapped in _DB_CATEGORY_QUERY_HINTS:
-        if mapped == cat_s and needle in q:
-            return extracted
-    if cat_s not in DB_POPUP_CATEGORIES:
-        logger.info(
-            "[intent_sanitize] db에 없는 category=%r -> null q_preview=%r",
-            cat_s,
-            q[:200],
-        )
-        return {**extracted, "category": None}
     logger.info(
-        "[intent_sanitize] ungrounded category=%r -> null q_preview=%r",
+        "[intent_sanitize] db에 없는 category=%r -> null q_preview=%r",
         cat_s,
-        q[:200],
+        (query or "")[:200],
     )
     return {**extracted, "category": None}
 
 
+def _few_shot_turns(cfg: dict[str, Any], *, vars: dict[str, str] | None = None) -> list[dict[str, str]]:
+    turns: list[dict[str, str]] = []
+    for shot in cfg.get("few_shots") or []:
+        turns.append(
+            {
+                "role": "user",
+                "content": render_template(shot["user"], **(vars or {})),
+            }
+        )
+        turns.append(
+            {
+                "role": "assistant",
+                "content": render_template(
+                    (shot.get("assistant") or "").strip(), **(vars or {})
+                ),
+            }
+        )
+    return turns
+
+
 def extract_search_keywords(query: str) -> str:
-    llm = get_llm()
-    prompt = f"""<|im_start|>system
-당신은 검색 키워드 추출기입니다. 
-사용자의 질문에서 불필요한 서술어, 조사, 인사말은 모두 제거하고 띄어쓰기로만 구분된 핵심 명사(지역, 장소, 날짜, 이벤트 종류 등)만 출력하세요.
-<|im_end|>
-<|im_start|>user
-이번 주말에 부산에서 열리는 뷰티 팝업스토어 알려줘<|im_end|>
-<|im_start|>assistant
-이번 주말 부산 뷰티 팝업스토어<|im_end|>
-<|im_start|>user
-오늘 성수동에서 하는 캐릭터 팝업스토어 추천해줄래?<|im_end|>
-<|im_start|>assistant
-오늘 성수동 캐릭터 팝업스토어<|im_end|>
-<|im_start|>user
-내일 여의도 더현대에서 하는 음식 팝업 있어?<|im_end|>
-<|im_start|>assistant
-내일 여의도 더현대 음식 팝업<|im_end|>
-<|im_start|>user
-{query}<|im_end|>
-<|im_start|>assistant
-"""
+    cfg = load_prompts()["keyword_extract"]
+    prompt = build_chatml(
+        system=cfg["system"].strip(),
+        turns=_few_shot_turns(cfg),
+        final_user=query,
+    )
     logger.debug(
         "[LLM:keyword_extract] to_llm: original_query=%r prompt_len=%d prompt=\n%s",
         query,
         len(prompt),
         _preview_for_log(prompt, max_chars=6000),
     )
+    _log_keyword_extract_prompt_stats(prompt, query)
     t_llm = time.perf_counter()
-    output = llm(prompt, max_tokens=64, stop=_STOP, echo=False)
+    extracted = _llm_complete(prompt, max_tokens=64)
     llm_ms = (time.perf_counter() - t_llm) * 1000
-    extracted = output["choices"][0]["text"].strip()
     logger.debug("[LLM:keyword_extract] from_llm: extracted_for_embedding=%r", extracted)
     logger.debug(
         "[keyword_extract:done] llm_elapsed_ms=%.1f original_len=%d extracted_len=%d "
@@ -372,32 +509,25 @@ def compose_embedding_text_from_search_conditions(
         "location": sc.get("location"),
     }
     slim = json.dumps(key_subset, ensure_ascii=False)
-    llm = get_llm()
-    prompt = f"""<|im_start|>system
-당신은 벡터 검색용 짧은 한국어 문장을 만드는 변환기입니다.
-[추출 JSON]에 있는 값만 근거로, 지역·주제(category)·기간(날짜)이 있으면 모두 드러나게 **한 줄** 검색 문장만 출력하세요.
-JSON에 없는 행사명·매장명·브랜드는 넣지 마세요. 거절·사과·설명·질문·**있음/없음 판단** 금지. 출력은 그 한 줄뿐입니다.
-**"없습니다", "있습니다" 같은 답변형 문장은 절대 쓰지 마세요.** 오직 검색에 쓸 명사구(예: 홍대 패션 팝업)만 쓰세요.
-원문 질문은 표현 보조일 뿐이며, JSON 필드와 모순되면 JSON을 따르세요.
-<|im_end|>
-<|im_start|>user
-[추출 JSON]
-{slim}
-
-[원문 질문]
-{query}
-<|im_end|>
-<|im_start|>assistant
-"""
+    ecfg = load_prompts()["embed_compose"]
+    user_block = render_template(
+        ecfg["user_template"].strip(),
+        slim=slim,
+        query=query,
+    )
+    prompt = build_chatml(
+        system=ecfg["system"].strip(),
+        final_user=user_block,
+    )
     logger.debug(
         "[LLM:embed_compose] to_llm: query_preview=%r slim=%s",
         (query or "")[:200],
         slim,
     )
+    _log_embed_compose_prompt_stats(prompt)
     t_llm = time.perf_counter()
-    output = llm(prompt, max_tokens=96, stop=_STOP, echo=False)
+    line = _llm_complete(prompt, max_tokens=96)
     llm_ms = (time.perf_counter() - t_llm) * 1000
-    line = (output["choices"][0]["text"] or "").strip()
     line = line.split("\n")[0].strip()
     if line.startswith("AI:"):
         line = line[3:].lstrip()
@@ -419,93 +549,34 @@ JSON에 없는 행사명·매장명·브랜드는 넣지 마세요. 거절·사�
 
 def extract_intent_and_conditions(query: str) -> dict[str, Any]:
     """의도·검색 조건 JSON 추출. 실패 시 chitchat + null 필드."""
-    llm = get_llm()
-    today = datetime.now()
-    current_date = today.strftime("%Y-%m-%d")
+    from config.chat_llm import get_chat_llm_config
 
-    prompt = f"""<|im_start|>system
-당신은 팝업스토어 안내 챗봇의 요청 분석기입니다. 오늘 날짜는 {current_date}입니다.
-사용자의 질문을 분석하여 반드시 아래 JSON 형식으로만 응답하세요.
+    from datetime import timedelta
 
-[분류 규칙 - intent]
-1. action: 팝업스토어, 놀거리, 장소 추천 및 검색 요청 (조건이 없어도 팝업을 원하면 action)
-2. chitchat: 인사, 감사, 감정 표현 등 가벼운 대화 (**팝업·추천·지역 검색이 주 내용이면 chitchat 금지, action**)
-3. out_of_domain: 팝업스토어와 **완전히 무관**한 질문만 (주식, 날씨, 코딩, 일반 상식 등). **'팝업' '팝업스토어' 'pop-up' 등이 질문에 있으면 절대 out_of_domain이 아닙니다 — 항상 action입니다.**
+    from graph.popup_date_filter import format_reference_context, reference_now_for_extract
 
-[추출 규칙]
-- 해당하지 않는 조건은 null로 비워두세요.
-- 날짜(시간)는 YYYY-MM-DD 형식의 범위로 추론하세요.
-- 지역·날짜 없이 **주제만** 묻는 경우에는 **category**에 아래 목록 중 질문과 맞는 **하나만** 넣으세요.
-- **category**: 사용자가 주제/장르를 **직접 말했을 때만** 채우세요. "○○에 팝업 있어?"처럼 지역·시기만 묻고 주제를 말하지 않으면 **반드시 null**입니다. 주제를 추측하지 마세요.
-- **category** 허용 값(정확히 동일한 문자열만, 아니면 null): {", ".join(DB_POPUP_CATEGORIES)}
+    intent_max = get_chat_llm_config().extract_intent_max_tokens
+    now = reference_now_for_extract()
+    ref_ctx = format_reference_context(now)
+    today_d = now.date()
+    days_to_sun = (6 - today_d.weekday()) % 7
+    this_week_sun = today_d + timedelta(days=days_to_sun or 7)
+    next_week_sun = this_week_sun + timedelta(days=7)
 
-<|im_end|>
-<|im_start|>user
-이번 주말에 성수동에서 하는 뷰티 팝업 찾아줘<|im_end|>
-<|im_start|>assistant
-{{
-  "intent": "action",
-  "category": "뷰티/헬스",
-  "start_date": "2026-05-16",
-  "end_date": "2026-05-17",
-  "location": "성수동"
-}}<|im_end|>
-<|im_start|>user
-안녕! 넌 이름이 뭐야?<|im_end|>
-<|im_start|>assistant
-{{
-  "intent": "chitchat",
-  "category": null,
-  "start_date": null,
-  "end_date": null,
-  "location": null
-}}<|im_end|>
-<|im_start|>user
-파이썬으로 크롤링 어떻게 해?<|im_end|>
-<|im_start|>assistant
-{{
-  "intent": "out_of_domain",
-  "category": null,
-  "start_date": null,
-  "end_date": null,
-  "location": null
-}}<|im_end|>
-<|im_start|>user
-요즘 갈만한 곳 추천해줘<|im_end|>
-<|im_start|>assistant
-{{
-  "intent": "action",
-  "category": null,
-  "start_date": null,
-  "end_date": null,
-  "location": null
-}}<|im_end|>
-<|im_start|>user
-애니메이션 팝업은 혹시 있어?<|im_end|>
-<|im_start|>assistant
-{{
-  "intent": "action",
-  "category": "캐릭터/IP",
-  "start_date": null,
-  "end_date": null,
-  "location": null
-}}<|im_end|>
-<|im_start|>user
-지금 홍대에서 열리는 팝업 있어?<|im_end|>
-<|im_start|>assistant
-{{
-  "intent": "action",
-  "category": null,
-  "start_date": null,
-  "end_date": null,
-  "location": "홍대"
-}}<|im_end|>
-<|im_start|>user
-{query}<|im_end|>
-<|im_start|>assistant
-"""
-    output = llm(prompt, max_tokens=200, stop=_STOP, echo=False)
-    result_text = output["choices"][0]["text"].strip()
+    icfg = load_prompts()["intent_extract"]
+    system = render_template(
+        icfg["system"].strip(),
+        reference_context=ref_ctx,
+        categories=", ".join(DB_POPUP_CATEGORIES),
+    )
+    shot_vars = {"next_week_sun": next_week_sun.isoformat()}
+    prompt = build_chatml(
+        system=system,
+        turns=_few_shot_turns(icfg, vars=shot_vars),
+        final_user=query,
+    )
+    _log_intent_extract_prompt_stats(prompt, query)
+    result_text = _llm_complete(prompt, max_tokens=intent_max)
     parsed = parse_llm_json_object(result_text)
     if parsed is None:
         fb = {

@@ -53,3 +53,8 @@ llm = Llama(
 
 def get_llm() -> Llama:
     return llm
+
+
+def llm_n_ctx() -> int:
+    """로드된 로컬 Llama 컨텍스트 길이(토큰)."""
+    return _n_ctx

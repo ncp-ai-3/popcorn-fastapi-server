@@ -11,5 +11,5 @@ __pycache__
 *.bin
 model_cache
 .env
-docs
+secrets/
 test_*.py

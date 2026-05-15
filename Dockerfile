@@ -13,6 +13,8 @@ RUN pip install --no-cache-dir -r requirements-docker.txt \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
 COPY fast.py embedding_client.py ./
+COPY config ./config/
+COPY prompts ./prompts/
 COPY graph ./graph/
 
 ENV LLM_N_GPU_LAYERS=0

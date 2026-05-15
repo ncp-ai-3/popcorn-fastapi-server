@@ -1,0 +1,4 @@
+# ChatML 토큰 (로컬 Llama / Qwen instruct)
+chatml:
+  im_start: "<|im_start|>"
+  im_end: "<|im_end|>"

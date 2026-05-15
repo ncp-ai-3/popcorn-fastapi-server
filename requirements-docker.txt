@@ -5,4 +5,7 @@ pydantic
 langgraph
 psycopg2-binary
 python-dotenv
+PyYAML>=6.0
 numpy
+# RECOMMEND_LLM_BACKEND=vertex (graph/recommend_llm.py)
+google-cloud-aiplatform>=1.60.0
