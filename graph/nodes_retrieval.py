@@ -103,9 +103,11 @@ def retrieve_popups(state: AgentState) -> dict[str, Any]:
     t0 = time.perf_counter()
     query_vector = state.get("query_vector")
     route = state.get("route", ROUTE_ACTION)
+    qv = query_vector
+    qv_len = len(qv) if isinstance(qv, (list, tuple)) else 0
     logger.debug(
         "[Node:enter] retrieve_popups query_vector_len=%s route=%s",
-        len(query_vector) if query_vector else 0,
+        qv_len,
         route,
     )
     try:

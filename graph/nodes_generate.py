@@ -155,6 +155,7 @@ def generate_recommendation(state: AgentState) -> dict[str, Any]:
         len(history),
     )
 
+    allowed_names_block = ""
     llm = get_llm()
     if route == ROUTE_ACTION:
         context_lines: list[str] = []
@@ -166,11 +167,23 @@ def generate_recommendation(state: AgentState) -> dict[str, Any]:
         if not context_lines:
             context_lines.append("(해당하는 팝업스토어 없음)")
         context = "\n".join(context_lines)
+        allowed_titles = [
+            str(p["name"]).strip()
+            for p in popups
+            if (p.get("name") or "").strip()
+        ]
+        if allowed_titles:
+            allowed_names_block = (
+                "[이번 턴 인용 허용 행사명 — **아래 줄에 적힌 문자열만** 행사 이름으로 쓸 수 있습니다. "
+                "철자·띄어쓰기·기호를 바꾸거나 줄임말·별칭을 쓰지 마세요. **여기 없는 이름은 모두 금지(환각)**입니다.]\n"
+                + "\n".join(f"- {t}" for t in allowed_titles)
+                + "\n\n"
+            )
         rules_block = """[답변 작성 규칙]
-1. 정보 제한: 반드시 아래 [팝업 목록]에 있는 '실제 장소/행사명'과 내용만 사용하여 답변하세요. 목록에 없는 정보는 지어내지 마세요. (목록이 비어 있으면 솔직히 안내하세요.)
+1. 정보 제한: 반드시 아래 [팝업 목록]·위 [인용 허용 행사명]에 있는 제목과 내용만 사용하세요. 목록에 없는 행사명·약칭(예: PW 팝업)·가상 브랜드는 **한 글자도 쓰지 마세요.** (목록이 비어 있으면 솔직히 안내하세요.)
 2. 대화형 화법: 기계적인 번호 매기기(1, 2, 3)나 기호([추천], [참고])는 답변에 쓰지 마세요. 옆 사람에게 추천하듯 자연스럽게 말하세요.
 3. 추천 순서: [추천] 태그가 붙은 팝업을 먼저 자세히 소개하고, [참고] 태그가 붙은 곳은 "시간이 남으면 가보기 좋은 곳" 정도로 가볍게 뒤에 덧붙이세요.
-4. **'○○' '△△' 등 자리 표시·예시 이름은 절대 쓰지 마세요.** [말투 참고]에 나온 기호도 답에 넣지 마세요. 오직 [팝업 목록]의 실제 제목만 부르세요.
+4. **'○○' '△△' 등 자리 표시·예시 이름은 절대 쓰지 마세요.** [말투 참고]에 나온 기호도 답에 넣지 마세요. 오직 [인용 허용 행사명]과 동일한 제목만 부르세요.
 5. 부족한 조건(주제·시기·지역)을 묻는 맺음말은 **본문에 넣지 마세요.** 시스템이 말미에 붙입니다.
 """
         example_block = """[말투 참고 — 아래 목록의 제목만 실제 이름으로 사용]
@@ -209,7 +222,7 @@ Assistant: 저는 날씨 쪽은 잘 모르겠어요. 대신 팝업 찾으실 계
 현재 시간은 {current_time}입니다. 일정은 이 시간을 기준으로 판단하세요.
 
 {rules_block}
-{extra}
+{allowed_names_block}{extra}
 
 {example_block}{popup_section}[직전 {RECOMMEND_HISTORY_TURNS}턴 대화만 참고]:
 {history_context}
@@ -224,7 +237,12 @@ Assistant: 저는 날씨 쪽은 잘 모르겠어요. 대신 팝업 찾으실 계
         len(prompt),
     )
     output = llm(prompt, max_tokens=_generate_max_tokens(), stop=_STOP, echo=False)
-    answer = output["choices"][0]["text"].strip()
+    choices = output.get("choices") if isinstance(output, dict) else None
+    if not choices:
+        logger.error("[LLM:recommend] empty choices output_keys=%s", output.keys() if isinstance(output, dict) else type(output))
+        answer = "잠시 답변을 만들지 못했습니다. 같은 질문으로 다시 시도해 주세요."
+    else:
+        answer = (choices[0].get("text") or "").strip()
     if answer.startswith("AI:"):
         answer = answer[3:].lstrip()
 

@@ -94,17 +94,25 @@ async def chat(request: SpringRequest):
     try:
         result = await langgraph_app.ainvoke(inputs, config=config)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # 임베딩 차원 불일치·EMBED 설정 누락 등 (embedding_client.fetch_query_embedding)
+        logger.warning("chat ValueError: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=502,
             detail=f"embedding API HTTP {e.response.status_code}",
-        )
+        ) from e
     except httpx.RequestError as e:
         raise HTTPException(
             status_code=503,
             detail=f"embedding API unreachable: {e.__class__.__name__}",
-        )
+        ) from e
+    except Exception as e:
+        logger.exception("chat ainvoke failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(e).__name__}: {e}",
+        ) from e
 
     _log_chat_summary(user_id=request.userId, question=request.question, result=result)
 
